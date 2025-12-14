@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Hand‑Tracked 3D Particle System</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <!-- Three.js -->
+  <script src="https://cdn.jsdelivr.net/npm/three@0.158.0/build/three.min.js"></script>
+
+  <!-- MediaPipe Hands -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+  <style>
+    html, body { margin: 0; padding: 0; overflow: hidden; background: #000; }
+    #video { display: none; }
+    #ui {
+      position: fixed; top: 12px; left: 12px; z-index: 10;
+      color: white; font-family: sans-serif; font-size: 14px;
+      background: rgba(0,0,0,0.5); padding: 10px; border-radius: 8px;
+    }
+    #startBtn {
+      position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+      padding: 14px 22px; font-size: 16px; border-radius: 10px; border: none;
+      cursor: pointer; background: #1e90ff; color: white; z-index: 20;
+    }
+  </style>
+</head>
+<body>
+
+<div id="ui">
+  Gesture‑Driven Particles<br />
+  ✋ Open hand: Expand<br />
+  🤏 Pinch: Contract<br />
+  ✌️ Two fingers: Switch Shape
+</div>
+
+<button id="startBtn">Enable Camera & Start</button>
+
+<video id="video" autoplay playsinline></video>
+
+<script>
+// =====================================================
+// IMPORTANT: Camera permissions REQUIRE user interaction
+// and a secure context (HTTPS or localhost)
+// =====================================================
+if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
+  alert('Camera access requires HTTPS or localhost.');
+}
+
+// ------------------
+// THREE.JS SETUP
+// ------------------
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x000000, 5, 30);
+
+const camera3D = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100);
+camera3D.position.z = 12;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+window.addEventListener('resize', () => {
+  camera3D.aspect = window.innerWidth / window.innerHeight;
+  camera3D.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ------------------
+// PARTICLE SYSTEM
+// ------------------
+const PARTICLE_COUNT = 8000;
+const geometry = new THREE.BufferGeometry();
+const positions = new Float32Array(PARTICLE_COUNT * 3);
+const colors = new Float32Array(PARTICLE_COUNT * 3);
+const color = new THREE.Color();
+
+for (let i = 0; i < PARTICLE_COUNT; i++) {
+  positions[i * 3] = (Math.random() - 0.5) * 6;
+  positions[i * 3 + 1] = (Math.random() - 0.5) * 6;
+  positions[i * 3 + 2] = (Math.random() - 0.5) * 6;
+
+  color.setHSL(Math.random(), 1, 0.6);
+  colors.set([color.r, color.g, color.b], i * 3);
+}
+
+geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+const material = new THREE.PointsMaterial({
+  size: 0.06,
+  vertexColors: true,
+  transparent: true,
+  blending: THREE.AdditiveBlending
+});
+
+const particles = new THREE.Points(geometry, material);
+scene.add(particles);
+
+// ------------------
+// WORD SHAPES (TEXT PARTICLES)
+// ------------------
+
+const WORDS = ["lee", "tea", "black lee", "neria"];
+let currentShape = 0;
+
+// offscreen canvas for text sampling
+const textCanvas = document.createElement('canvas');
+const ctx = textCanvas.getContext('2d');
+textCanvas.width = 512;
+textCanvas.height = 256;
+
+function sampleTextPoints(text) {
+  ctx.clearRect(0, 0, textCanvas.width, textCanvas.height);
+  ctx.fillStyle = 'white';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = 'bold 120px sans-serif';
+  ctx.fillText(text, textCanvas.width / 2, textCanvas.height / 2);
+
+  const img = ctx.getImageData(0, 0, textCanvas.width, textCanvas.height).data;
+  const points = [];
+
+  for (let y = 0; y < textCanvas.height; y += 4) {
+    for (let x = 0; x < textCanvas.width; x += 4) {
+      const i = (y * textCanvas.width + x) * 4;
+      if (img[i + 3] > 128) {
+        points.push({
+          x: (x / textCanvas.width - 0.5) * 8,
+          y: -(y / textCanvas.height - 0.5) * 4,
+          z: (Math.random() - 0.5) * 0.5
+        });
+      }
+    }
+  }
+  return points;
+}
+
+const wordPointCache = WORDS.map(w => sampleTextPoints(w));
+
+
+function morphToShape(wordIndex, scale) {
+  const points = wordPointCache[wordIndex];
+  for (let i = 0; i < PARTICLE_COUNT; i++) {
+    const p = points[i % points.length];
+    positions[i * 3] = p.x * scale;
+    positions[i * 3 + 1] = p.y * scale;
+    positions[i * 3 + 2] = p.z * scale;
+
+    color.setHSL((i / PARTICLE_COUNT + performance.now() * 0.00015) % 1, 1, 0.6);
+    colors.set([color.r, color.g, color.b], i * 3);
+  }
+  geometry.attributes.position.needsUpdate = true;
+  geometry.attributes.color.needsUpdate = true;
+}
+  geometry.attributes.position.needsUpdate = true;
+  geometry.attributes.color.needsUpdate = true;
+}
+
+// ------------------
+// HAND TRACKING
+// ------------------
+let handScale = 4;
+let lastGestureTime = 0;
+let cam = null;
+
+const hands = new Hands({
+  locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`
+});
+
+hands.setOptions({
+  maxNumHands: 1,
+  modelComplexity: 1,
+  minDetectionConfidence: 0.7,
+  minTrackingConfidence: 0.7
+});
+
+hands.onResults(results => {
+  if (!results.multiHandLandmarks) return;
+
+  const lm = results.multiHandLandmarks[0];
+  const thumb = lm[4];
+  const index = lm[8];
+  const middle = lm[12];
+
+  const pinchDist = Math.hypot(thumb.x - index.x, thumb.y - index.y);
+
+  if (pinchDist < 0.04) handScale = Math.max(1.5, handScale - 0.1);
+  if (pinchDist > 0.08) handScale = Math.min(8, handScale + 0.05);
+
+  if (Math.abs(index.y - middle.y) < 0.02 && performance.now() - lastGestureTime > 800) {
+    currentShape = (currentShape + 1) % WORDS.length;
+    lastGestureTime = performance.now();
+  }
+});
+
+// ------------------
+// CAMERA START (USER GESTURE REQUIRED)
+// ------------------
+const startBtn = document.getElementById('startBtn');
+const videoElement = document.getElementById('video');
+
+startBtn.onclick = async () => {
+  try {
+    cam = new Camera(videoElement, {
+      onFrame: async () => await hands.send({ image: videoElement }),
+      width: 640,
+      height: 480
+    });
+    await cam.start();
+    startBtn.remove();
+  } catch (err) {
+    console.error('Camera error:', err);
+    alert('Camera permission denied. Please allow access and reload.');
+  }
+};
+
+// ------------------
+// ANIMATION LOOP
+// ------------------
+function animate() {
+  requestAnimationFrame(animate);
+  particles.rotation.y += 0.002;
+  particles.rotation.x += 0.001;
+  morphToShape(currentShape, handScale);
+  renderer.render(scene, camera3D);
+}
+
+animate();
+</script>
+</body>
+</html>
